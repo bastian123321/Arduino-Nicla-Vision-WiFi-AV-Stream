@@ -25,9 +25,9 @@ GC2145 camera --DCMI + DMA (double buffer)--> YUV422 frame (QVGA, 150 KB)
 * Found by name: the board answers **`nicla-vision.local`** (mDNS), so you
   don't need its IP address.
 * **Low power**: the CPU sleeps (`__WFI`) whenever it waits for the next frame,
-  which comes to about 35% load while streaming QVGA at 21 fps, and WiFi uses
-  power-save between packets. With nobody watching, the camera sleeps as well.
-  WiFi stays connected.
+  which comes to about 19% load while streaming QVGA at 21 fps (built with
+  `-O2`), and WiFi uses power-save between packets. With nobody watching, the
+  camera sleeps as well. WiFi stays connected.
 * USB keeps working as before (upload with the 1200-baud reset, plus a debug
   viewer).
 
@@ -66,8 +66,11 @@ Steps:
    `wifi_secrets.h` is in `.gitignore`, so it never gets committed.
 3. Import `NICLA_VISION_WIFI_CAMERA` into STM32CubeIDE (*File → Import → Existing
    Projects into Workspace*, tick the `_CM7` and `_CM4` projects).
-4. Build both cores (**Ctrl+B**). The CM7 image is about 590 KB, mostly the WiFi
-   chip firmware.
+4. Build both cores (**Ctrl+B**). The CM7 image is about 520 KB, mostly the WiFi
+   chip firmware. The CM7 project is set to `-O2` in both the Debug and Release
+   configurations (*Properties → C/C++ Build → Settings → MCU GCC Compiler →
+   Optimization*). If you need to step through code with an ST-Link, switch to
+   `-O0` temporarily.
 5. Upload: *Run → External Tools → Upload via USB (Arduino bootloader)*. If it
    isn't in the menu yet, look under *External Tools Configurations… → Program*.
    The first time, double-tap reset first.
@@ -219,7 +222,7 @@ python NICLA_VISION_WIFI_CAMERA/tools/camera_viewer.py
 ```
 
 ```
-board: cam=0 id=0x2145 streaming | camera 21 fps, sent 21 fps, 6800 B/frame, encode 10 ms | cpu 35% | dropped 0, jpeg errors 0, restarts 0
+board: cam=0 id=0x2145 streaming | camera 21 fps, sent 21 fps, 5800 B/frame, encode 3 ms | cpu 19% | dropped 0, jpeg errors 0, restarts 0
 board: wifi: up 192.168.1.42 rssi -57 | http=0, 1 viewer(s) | open http://nicla-vision.local/ or http://192.168.1.42/
 ```
 
