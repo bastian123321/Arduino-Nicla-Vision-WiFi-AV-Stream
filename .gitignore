@@ -1,0 +1,19 @@
+# STM32CubeIDE build output
+Debug/
+Release/
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.map
+*.list
+*.bin
+*.hex
+
+# Eclipse / IDE local state
+.metadata/
+*.launch.bak
+
+# Local WiFi credentials (see Core/Inc/wifi_secrets.example.h)
+wifi_secrets.h
