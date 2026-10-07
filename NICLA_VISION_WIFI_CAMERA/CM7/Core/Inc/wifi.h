@@ -21,4 +21,7 @@ const char *wifi_status_text(void);
 /* Current IPv4 address as text ("0.0.0.0" before DHCP) */
 const char *wifi_ip_text(void);
 
+/* Hostname for DHCP and mDNS: the board answers "<hostname>.local" */
+const char *wifi_hostname(void);
+
 #endif /* WIFI_H */

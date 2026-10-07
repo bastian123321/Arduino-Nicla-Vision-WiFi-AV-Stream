@@ -14,7 +14,7 @@ hand-off and the upload tooling in detail.
 ```
 GC2145 camera --DCMI + DMA (double buffer)--> YUV422 frame (QVGA, 150 KB)
    --hardware JPEG codec--> 3-10 KB JPEG --lwIP TCP--> CYW4343W WiFi (SDIO)
-   --> your router --> browser at http://<board-ip>/
+   --> your router --> browser at http://nicla-vision.local/
 ```
 
 * 320×240 (QVGA). Typically 15–25 fps: the camera slows down in dim light,
@@ -22,8 +22,12 @@ GC2145 camera --DCMI + DMA (double buffer)--> YUV422 frame (QVGA, 150 KB)
 * Bare metal, no RTOS: everything runs from the CM7 main loop. The CM4 is unused.
 * All hardware is configured in the `.ioc`, so you can review and change it
   from CubeMX.
-* **Idle mode**: with nobody watching, the camera sleeps and the CPU waits in
-  `__WFI`. WiFi stays connected.
+* Found by name: the board answers **`nicla-vision.local`** (mDNS), so you
+  don't need its IP address.
+* **Low power**: the CPU sleeps (`__WFI`) whenever it waits for the next frame,
+  which comes to about 35% load while streaming QVGA at 21 fps, and WiFi uses
+  power-save between packets. With nobody watching, the camera sleeps as well.
+  WiFi stays connected.
 * USB keeps working as before (upload with the 1200-baud reset, plus a debug
   viewer).
 
@@ -62,34 +66,40 @@ Steps:
    `wifi_secrets.h` is in `.gitignore`, so it never gets committed.
 3. Import `NICLA_VISION_WIFI_CAMERA` into STM32CubeIDE (*File → Import → Existing
    Projects into Workspace*, tick the `_CM7` and `_CM4` projects).
-4. Build both cores (**Ctrl+B**). The CM7 image is about 570 KB, mostly the WiFi
+4. Build both cores (**Ctrl+B**). The CM7 image is about 590 KB, mostly the WiFi
    chip firmware.
 5. Upload: *Run → External Tools → Upload via USB (Arduino bootloader)*. If it
    isn't in the menu yet, look under *External Tools Configurations… → Program*.
    The first time, double-tap reset first.
 6. Wait about 5 seconds for the board to join the network, then open
-   `http://<board-ip>/`.
+   **`http://nicla-vision.local/`**. Type the `http://`, otherwise some browsers
+   start a web search.
 
-**Finding the IP address**: your router's list of connected devices shows it
+**By name or by IP**: `nicla-vision.local` works on Windows 10/11, macOS, iOS
+and Linux. On Android it depends on the browser and version. You can always
+use the IP address instead: your router's list of connected devices shows it
 (hostname `nicla-vision`), or run the [USB debug viewer](#7-usb-debug-viewer),
 which prints a line like
-`wifi: up 192.168.1.42 rssi -57 | ... | open http://192.168.1.42/`.
-Most routers keep giving the board the same address.
+`wifi: up 192.168.1.42 rssi -57 | ... | open http://nicla-vision.local/ or http://192.168.1.42/`.
 
 ## 2. Using the stream
 
 | URL | What you get |
 |-----|--------------|
-| `http://<ip>/` | Page with the live video |
-| `http://<ip>/stream` | Raw MJPEG stream (`multipart/x-mixed-replace`) |
-| `http://<ip>/snapshot.jpg` | One JPEG frame |
+| `http://nicla-vision.local/` | Page with the live video |
+| `http://nicla-vision.local/stream` | Raw MJPEG stream (`multipart/x-mixed-replace`) |
+| `http://nicla-vision.local/snapshot.jpg` | One JPEG frame |
+
+The IP address works in place of `nicla-vision.local` everywhere. The board
+also advertises the page as an `_http._tcp` service ("Nicla Vision camera"),
+so network-browser apps list it.
 
 The raw stream also opens in **VLC** (*Media → Open Network Stream*) and in
 **OpenCV**:
 
 ```python
 import cv2
-cap = cv2.VideoCapture("http://192.168.1.42/stream")
+cap = cv2.VideoCapture("http://nicla-vision.local/stream")
 while True:
     ok, frame = cap.read()
     if not ok:
@@ -174,12 +184,12 @@ generated files), so regenerating from the `.ioc` keeps it.
 | `Src/camera.c` | Snapshot and continuous capture (DMA double buffer), cache maintenance, sleep/wake |
 | `Src/jpeg_enc.c` | Hardware JPEG: YUYV → 16×8 MCU rows fed from the codec's GetData callback |
 | `Src/http_stream.c` | HTTP server on port 80: `/`, `/stream`, `/snapshot.jpg` |
-| `Src/wifi.c` | WiFi start, WPA2 join, DHCP, reconnect every 10 s, status text |
+| `Src/wifi.c` | WiFi start, WPA2 join, DHCP, mDNS (`nicla-vision.local`), power save, reconnect every 10 s, status text |
 | `Src/sdio.c` | SDMMC2 as an SDIO host (polled FIFO with hardware flow control) |
 | `Src/cyw43_port.c`, `Inc/cyw43_configport.h` | Glue between the WiFi driver and this board |
 | `Inc/lwipopts.h`, `Inc/arch/cc.h` | lwIP configuration (NO_SYS) |
 | `Src/net/cyw43/` | WiFi driver and chip firmware (third party, unmodified) |
-| `Src/net/lwip/`, `Inc/lwip/`, `Inc/netif/` | lwIP 2.1.2 (third party, unmodified) |
+| `Src/net/lwip/`, `Inc/lwip/`, `Inc/netif/` | lwIP 2.1.2 including its mDNS responder (third party, unmodified) |
 | `Src/usb_link.c` | Framed frames and log lines over USB CDC |
 | `tools/camera_viewer.py` | USB debug viewer for the PC |
 
@@ -193,7 +203,8 @@ generated files), so regenerating from the `.ioc` keeps it.
 | JPEG quality (1–100) | `JPEG_QUALITY` in `main.c` | 60 |
 | Idle delay after the last viewer leaves | `IDLE_AFTER_MS` in `main.c` | 3000 ms |
 | Mirror / flip | `gc2145_set_orientation()` call in `camera.c` | upright |
-| Hostname shown to the router | `cyw43_port_hostname` in `cyw43_port.c` | `nicla-vision` |
+| Hostname (router list and `<name>.local`) | `cyw43_port_hostname` in `cyw43_port.c` | `nicla-vision` |
+| WiFi power save | `cyw43_wifi_pm()` call in `wifi.c` | `CYW43_PERFORMANCE_PM` |
 | SDIO bus clock | `SDIO_BUS_HZ` in `sdio.c` | 24 MHz (the chip allows up to 50) |
 | WiFi country | `CYW43_COUNTRY_WORLDWIDE` in `wifi.c` | worldwide (channels 1–11) |
 
@@ -208,9 +219,12 @@ python NICLA_VISION_WIFI_CAMERA/tools/camera_viewer.py
 ```
 
 ```
-board: cam=0 id=0x2145 streaming | camera 25 fps, sent 25 fps, 3100 B/frame, encode 10 ms | dropped 0, jpeg errors 0, restarts 0
-board: wifi: up 192.168.1.42 rssi -57 | http=0, 1 viewer(s) | open http://192.168.1.42/
+board: cam=0 id=0x2145 streaming | camera 21 fps, sent 21 fps, 6800 B/frame, encode 10 ms | cpu 35% | dropped 0, jpeg errors 0, restarts 0
+board: wifi: up 192.168.1.42 rssi -57 | http=0, 1 viewer(s) | open http://nicla-vision.local/ or http://192.168.1.42/
 ```
+
+`cpu` is the share of time the CPU is awake. The rest of the time it sleeps in
+`__WFI` until the next interrupt.
 
 An open viewer counts as "watching", so the camera doesn't go idle while it
 runs. **Close the viewer before uploading**: the upload script needs the COM port.
@@ -219,7 +233,8 @@ runs. **Close the viewer before uploading**: the upload script needs the COM por
 
 | What you see | Cause / fix |
 |--------------|-------------|
-| Build error *Copy Core/Inc/wifi_secrets.example.h to …* | Create `wifi_secrets.h` (step 1 of the quick start). |
+| Build error *Copy Core/Inc/wifi_secrets.example.h to …* | Create `wifi_secrets.h` (step 2 of the quick start). |
+| `nicla-vision.local` not found, but the IP works | The device or browser doesn't resolve mDNS names (some Android versions, some company networks block multicast). Use the IP. |
 | `wifi start=-1 … off` / `chip did not start` | The WiFi chip doesn't answer on SDIO. Check the SDMMC2 pins (PG11 for D2!), `WL_REG_ON` on PG4, and that `HAL_SD_MspInit` is generated. |
 | `network not found` | Wrong SSID, or a 5 GHz-only network. |
 | `wrong password` | Check `WIFI_PASSWORD`. |

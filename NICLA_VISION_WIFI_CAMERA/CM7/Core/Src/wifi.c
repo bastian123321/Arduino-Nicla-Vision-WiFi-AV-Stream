@@ -11,6 +11,7 @@
 #include "lwip/init.h"
 #include "lwip/timeouts.h"
 #include "lwip/netif.h"
+#include "lwip/apps/mdns.h"
 #include "usb_link.h"
 
 #if __has_include("wifi_secrets.h")
@@ -21,6 +22,9 @@
 
 /* Try again this long after a failed or lost connection */
 #define REJOIN_INTERVAL_MS    10000U
+
+/* How long other devices may cache our mDNS answers (seconds) */
+#define MDNS_TTL_S            120U
 
 static int started;
 static uint32_t join_tick;
@@ -61,6 +65,34 @@ void lwip_port_assert(const char *msg, const char *file, int line)
   }
 }
 
+/* ---- mDNS ----------------------------------------------------------------- */
+
+/* TXT record of the advertised web page: tells browsers/apps where it lives */
+static void http_service_txt(struct mdns_service *service, void *userdata)
+{
+  (void)userdata;
+  mdns_resp_add_service_txtitem(service, "path=/", 6);
+}
+
+/*
+ * Answer "<hostname>.local" (e.g. nicla-vision.local) and advertise the web
+ * page as an _http._tcp service. lwIP probes and announces the name by itself
+ * once DHCP has assigned an address, and again whenever the address changes.
+ */
+static void mdns_start(void)
+{
+  struct netif *n = &cyw43_state.netif[CYW43_ITF_STA];
+
+  mdns_resp_init();
+  if (mdns_resp_add_netif(n, cyw43_port_hostname, MDNS_TTL_S) != ERR_OK)
+  {
+    usb_link_log("wifi: mDNS start failed");
+    return;
+  }
+  mdns_resp_add_service(n, "Nicla Vision camera", "_http", DNSSD_PROTO_TCP, 80, MDNS_TTL_S,
+                        http_service_txt, NULL);
+}
+
 /* ---- WiFi ----------------------------------------------------------------- */
 
 static void join(void)
@@ -94,8 +126,14 @@ int wifi_start(void)
     return -1;
   }
 
-  /* No power saving: lowest latency and highest throughput for streaming */
-  cyw43_wifi_pm(&cyw43_state, cyw43_pm_value(CYW43_NO_POWERSAVE_MODE, 0, 0, 0, 0));
+  /*
+   * "Performance" power save (the driver's default): the radio sleeps between
+   * packets but wakes for every beacon (DTIM 1) and stays awake 200 ms after
+   * traffic, so streaming throughput is unaffected while idle draws far less.
+   */
+  cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+
+  mdns_start();
 
   uint8_t mac[6];
   cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
@@ -163,6 +201,11 @@ void wifi_poll(void)
 int wifi_is_up(void)
 {
   return started && (cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) == CYW43_LINK_UP);
+}
+
+const char *wifi_hostname(void)
+{
+  return cyw43_port_hostname;
 }
 
 const char *wifi_ip_text(void)

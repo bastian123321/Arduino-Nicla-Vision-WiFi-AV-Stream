@@ -286,6 +286,7 @@ Error_Handler();
   /* Per-second counters for the status line */
   uint32_t sent = 0, dropped = 0, jpeg_errors = 0, restarts = 0;
   uint32_t bytes_sum = 0, enc_ms_sum = 0;
+  uint32_t sleep_us = 0;   /* time spent in __WFI, for the CPU load figure */
 
   /* USER CODE END 2 */
 
@@ -367,15 +368,17 @@ Error_Handler();
       {
         cam_frames_last = 0;   /* counter restarted with the stream */
       }
+      uint32_t cpu_load = (sleep_us < 1000000U) ? (100U - (sleep_us / 10000U)) : 0U;
       usb_link_log("cam=%d id=0x%04X %s | camera %lu fps, sent %lu fps, %lu B/frame, encode %lu ms | "
-                   "dropped %lu, jpeg errors %lu, restarts %lu",
+                   "cpu %lu%% | dropped %lu, jpeg errors %lu, restarts %lu",
                    (int)cam_status, cam_id, cam_awake ? "streaming" : "idle",
                    cam_frames - cam_frames_last, sent, bytes_sum / n,
-                   enc_ms_sum / n, dropped, jpeg_errors, restarts);
+                   enc_ms_sum / n, cpu_load, dropped, jpeg_errors, restarts);
       if (wifi_is_up())
       {
-        usb_link_log("wifi: %s | http=%d, %d viewer(s) | open http://%s/",
-                     wifi_status_text(), http_status, http_stream_clients(), wifi_ip_text());
+        usb_link_log("wifi: %s | http=%d, %d viewer(s) | open http://%s.local/ or http://%s/",
+                     wifi_status_text(), http_status, http_stream_clients(),
+                     wifi_hostname(), wifi_ip_text());
       }
       else
       {
@@ -385,13 +388,21 @@ Error_Handler();
       sent = dropped = jpeg_errors = 0;
       bytes_sum = enc_ms_sum = 0;
       restarts = 0;
+      sleep_us = 0;
     }
 
-    /* Idle: sleep until the next interrupt (SysTick, WiFi host wake or USB) */
-    if (!cam_awake)
-    {
-      __WFI();
-    }
+    /*
+     * Nothing left to do until the next interrupt: let the CPU sleep instead of
+     * spinning. Every event that brings work wakes it: camera frame done (DMA),
+     * WiFi data (WL_HOST_WAKE), USB, and the 1 ms SysTick for lwIP timers.
+     * Interrupts are masked around __WFI so the handler runs after the time is
+     * taken, which keeps the CPU load figure honest.
+     */
+    __disable_irq();
+    uint32_t t_sleep = TIM2->CNT;
+    __WFI();
+    sleep_us += TIM2->CNT - t_sleep;
+    __enable_irq();
   }
   /* USER CODE END 3 */
 }

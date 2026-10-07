@@ -23,7 +23,9 @@
 #define PBUF_POOL_SIZE                  24            /* RX buffers */
 #define MEMP_NUM_TCP_PCB                6
 #define MEMP_NUM_TCP_PCB_LISTEN         2
-#define MEMP_NUM_UDP_PCB                4
+#define MEMP_NUM_UDP_PCB                5             /* DHCP + mDNS + spare */
+/* lwIP's own timers plus mDNS probing/announcing */
+#define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 
 /* ---- Protocols ------------------------------------------------------------ */
 #define LWIP_IPV4                       1
@@ -34,8 +36,14 @@
 #define LWIP_RAW                        0
 #define LWIP_UDP                        1
 #define LWIP_TCP                        1
-#define LWIP_IGMP                       0
+#define LWIP_IGMP                       1             /* multicast, needed by mDNS */
 #define LWIP_DNS                        0
+
+/* ---- mDNS: answers "nicla-vision.local" ------------------------------------- */
+#define LWIP_MDNS_RESPONDER             1
+#define LWIP_NUM_NETIF_CLIENT_DATA      1             /* mDNS state per netif */
+#define LWIP_NETIF_EXT_STATUS_CALLBACK  1             /* re-announce when the IP changes */
+#define MDNS_MAX_SERVICES               1             /* advertises the web page (_http._tcp) */
 
 /* ---- DHCP client ------------------------------------------------------------ */
 #define LWIP_DHCP                       1
