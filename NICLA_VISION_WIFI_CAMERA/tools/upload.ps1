@@ -61,6 +61,10 @@ function Find-DfuUtil {
 }
 
 function Test-DfuPresent([string]$exe) {
+    # dfu-util -l also lists (and warns on stderr about) other DFU devices on
+    # the PC, e.g. USB audio interfaces. With 'Stop', Windows PowerShell would
+    # turn those stderr lines into a terminating error, so read them as text.
+    $ErrorActionPreference = 'Continue'
     $out = & $exe -l 2>&1 | Out-String
     return $out -match [regex]::Escape("[$DfuId]")
 }

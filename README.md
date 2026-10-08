@@ -2,7 +2,7 @@
 
 An STM32CubeIDE (HAL) project that turns the **Arduino Nicla Vision**
 (STM32H747AII6) into a WiFi camera. The board joins your WiFi network and
-streams the camera as MJPEG. You open it in any browser, with no app or driver
+streams the camera as MJPEG, plus the microphone as live audio. You open it in any browser, with no app or driver
 on the PC. It's flashed through the stock **Arduino bootloader over USB**, so no
 ST-Link is needed.
 
@@ -15,10 +15,14 @@ hand-off and the upload tooling in detail.
 GC2145 camera --DCMI + DMA (double buffer)--> YUV422 frame (QVGA, 150 KB)
    --hardware JPEG codec--> 3-10 KB JPEG --lwIP TCP--> CYW4343W WiFi (SDIO)
    --> your router --> browser at http://nicla-vision.local/
+
+PDM microphone --DFSDM1 + DMA--> 16 kHz 16-bit PCM --WebSocket /audio--> page player
 ```
 
 * 320×240 (QVGA). Typically 15–25 fps: the camera slows down in dim light,
   and the stream adapts to the WiFi speed instead of building up delay.
+* **Audio**: the on-board microphone at 16 kHz, played by the page after a
+  click on **Audio on**, about 0.2 s behind the video.
 * Bare metal, no RTOS: everything runs from the CM7 main loop. The CM4 is unused.
 * All hardware is configured in the `.ioc`, so you can review and change it
   from CubeMX.
@@ -92,6 +96,7 @@ which prints a line like
 | `http://nicla-vision.local/` | Page with the live video |
 | `http://nicla-vision.local/stream` | Raw MJPEG stream (`multipart/x-mixed-replace`) |
 | `http://nicla-vision.local/snapshot.jpg` | One JPEG frame |
+| `ws://nicla-vision.local/audio` | WebSocket: microphone as 16 kHz 16-bit mono PCM (little endian), one binary message per 20 ms (up to 100 ms when catching up) |
 
 The IP address works in place of `nicla-vision.local` everywhere. The board
 also advertises the page as an `_http._tcp` service ("Nicla Vision camera"),
@@ -112,7 +117,11 @@ while True:
         break
 ```
 
-Up to 3 clients can connect at the same time. The **green LED** blinks while
+Browsers only allow sound after a click, so the page has an **Audio on** button.
+The page resamples the audio to the output rate itself and schedules each
+block at an exact sample position (no AudioWorklet, so it works on plain HTTP).
+
+Up to 5 connections at the same time (the video and the audio each use one per page). The **green LED** blinks while
 frames are sent and is off in idle mode.
 
 ## 3. Pins and peripherals
@@ -136,12 +145,15 @@ All pins are assigned to the Cortex-M7 and locked (*Signal Pinning*) in the `.io
 | WiFi power | `WL_REG_ON` | PG4 | output, starts low |
 | WiFi interrupt | `WL_HOST_WAKE` | PD15 | EXTI falling edge, NVIC priority 5 |
 | µs time base | TIM2 | – | 1 MHz free-running counter |
+| Microphone clock | DFSDM1_CKOUT | PD10 | AF3, 2 MHz PDM clock |
+| Microphone data | DFSDM1_DATIN2 | PE7 | AF3 |
 | PMIC | I2C2 SDA / SCL | PF0 / PF1 | as in the template |
 | USB HS (ULPI) | USB_OTG_HS + `USB_PHY_RST` | PA3, PA5, PB0, PB1, PB5, PB10–13, PC0, PC2_C, PC3_C + PA2 | as in the template |
 | LEDs | `LED_R` / `LED_G` / `LED_B` | PE3 / PC13 / PF4 | active low |
 
 DMA: DCMI → **DMA2 Stream 3** (peripheral to memory, word, priority high).
 The firmware switches it to double-buffer mode at run time.
+DFSDM1_FLT0 → **DMA1 Stream 0** (peripheral to memory, word, circular, priority high).
 
 ## 4. CubeMX configuration
 
@@ -164,6 +176,7 @@ maintenance for the camera DMA buffers.
 | JPEG | Activated (defaults) |
 | SDMMC2 | SD 4 bits Wide bus, pins as above, NVIC off |
 | TIM2 | Internal clock, PSC 239, period 4294967295, no interrupt |
+| DFSDM1 | Channel 2 *PDM/SPI input from ch2 and internal clock*, clock output on; output clock divider 60 (120 MHz PCLK → 2 MHz); SPI rising edge; Filter 0: regular channel 2, continuous, software trigger, fast mode, DMA mode, FastSinc, Fosr 125, Iosr 1 (→ 16 kHz); DMA as above |
 | GPIO | PG4 output `WL_REG_ON` (low); PD15 `GPIO_EXTI15` falling edge `WL_HOST_WAKE`; NVIC1: EXTI line[15:10] priority 5 |
 
 **Project Manager → Advanced Settings**, *Do Not Generate Function Call*:
@@ -186,7 +199,9 @@ generated files), so regenerating from the `.ioc` keeps it.
 | `Src/gc2145.c` | GC2145 sensor driver (register table from OpenMV), 180° rotation, sleep |
 | `Src/camera.c` | Snapshot and continuous capture (DMA double buffer), cache maintenance, sleep/wake |
 | `Src/jpeg_enc.c` | Hardware JPEG: YUYV → 16×8 MCU rows fed from the codec's GetData callback |
-| `Src/http_stream.c` | HTTP server on port 80: `/`, `/stream`, `/snapshot.jpg` |
+| `Src/http_stream.c` | HTTP server on port 80: `/`, `/stream`, `/snapshot.jpg`, `/audio` (WebSocket) and the page with the audio player |
+| `Src/audio.c` | Microphone: DFSDM DMA ring, DC-removing high-pass, gain, FIFO for the WebSocket |
+| `Src/ws_util.c` | WebSocket handshake (SHA-1 + Base64 of the key) |
 | `Src/wifi.c` | WiFi start, WPA2 join, DHCP, mDNS (`nicla-vision.local`), power save, reconnect every 10 s, status text |
 | `Src/sdio.c` | SDMMC2 as an SDIO host (polled FIFO with hardware flow control) |
 | `Src/cyw43_port.c`, `Inc/cyw43_configport.h` | Glue between the WiFi driver and this board |
@@ -196,7 +211,7 @@ generated files), so regenerating from the `.ioc` keeps it.
 | `Src/usb_link.c` | Framed frames and log lines over USB CDC |
 | `tools/camera_viewer.py` | USB debug viewer for the PC |
 
-**RAM** (512 KB AXI SRAM): two 150 KB frame buffers, 32 KB JPEG buffer, about
+**RAM** (512 KB AXI SRAM): two 150 KB frame buffers, 32 KB JPEG buffer, 16 KB audio FIFO, about
 90 KB for lwIP and the WiFi driver; about 70 KB stays free for the stack.
 
 ## 6. Settings you may want to change
@@ -204,6 +219,7 @@ generated files), so regenerating from the `.ioc` keeps it.
 | Setting | Where | Default |
 |---------|-------|---------|
 | JPEG quality (1–100) | `JPEG_QUALITY` in `main.c` | 60 |
+| Microphone gain | `AUDIO_GAIN` in `audio.c` | 8 |
 | Idle delay after the last viewer leaves | `IDLE_AFTER_MS` in `main.c` | 3000 ms |
 | Mirror / flip | `gc2145_set_orientation()` call in `camera.c` | upright |
 | Hostname (router list and `<name>.local`) | `cyw43_port_hostname` in `cyw43_port.c` | `nicla-vision` |
@@ -224,6 +240,7 @@ python NICLA_VISION_WIFI_CAMERA/tools/camera_viewer.py
 ```
 board: cam=0 id=0x2145 streaming | camera 21 fps, sent 21 fps, 5800 B/frame, encode 3 ms | cpu 19% | dropped 0, jpeg errors 0, restarts 0
 board: wifi: up 192.168.1.42 rssi -57 | http=0, 1 viewer(s) | open http://nicla-vision.local/ or http://192.168.1.42/
+board: mic: on | peak -28 dBFS | dropped blocks 0 | 1 audio listener(s), 50 msgs sent, 0 skipped
 ```
 
 `cpu` is the share of time the CPU is awake. The rest of the time it sleeps in
@@ -245,7 +262,9 @@ runs. **Close the viewer before uploading**: the upload script needs the COM por
 | `cam=-1 id=0x0000` (red LED) | The camera doesn't answer on I2C3: check PA8/PC9 and that XCLK (TIM3_CH2 on PA7) runs. |
 | Colours swapped (blue skin) | Cb/Cr order: see `CB_OFFSET` / `CR_OFFSET` in `jpeg_enc.c` (tied to `GC2145_ROTATE`). |
 | `dropped` keeps rising | Encoding started too late and the camera overwrote the buffer. Something in the main loop is blocking for more than one frame period. |
-| Page loads, no video | Another 3 clients are connected (limit), or the board went idle and a stale tab is open: reload. |
+| No sound after **Audio on** | Turn the volume up and check the `mic:` status line: `peak` should change when you talk. Reload the page with Ctrl+F5 after a firmware update so the browser gets the new player. |
+| Upload: *Cannot open DFU device … LIBUSB_ERROR_NOT_SUPPORTED* | Another DFU-capable USB device is connected (e.g. a USB audio interface). The upload script ignores it; if your copy is older, update `tools/upload.ps1`. |
+| Page loads, no video | All 5 connections are in use, or the board went idle and a stale tab is open: reload. |
 
 ## 9. Third-party code
 

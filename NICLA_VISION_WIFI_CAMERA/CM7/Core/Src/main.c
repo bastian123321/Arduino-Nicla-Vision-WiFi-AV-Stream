@@ -29,6 +29,7 @@
 #include "wifi.h"
 #include "http_stream.h"
 #include "cyw43_port.h"
+#include "audio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -64,6 +65,10 @@
 DCMI_HandleTypeDef hdcmi;
 DMA_HandleTypeDef hdma_dcmi;
 
+DFSDM_Filter_HandleTypeDef hdfsdm1_filter0;
+DFSDM_Channel_HandleTypeDef hdfsdm1_channel2;
+DMA_HandleTypeDef hdma_dfsdm1_flt0;
+
 I2C_HandleTypeDef hi2c2;
 I2C_HandleTypeDef hi2c3;
 
@@ -95,6 +100,7 @@ static void MX_I2C3_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_JPEG_Init(void);
 static void MX_TIM2_Init(void);
+static void MX_DFSDM1_Init(void);
 /* USER CODE BEGIN PFP */
 static void Bootloader_Handoff(void);
 static void Disable_Caches(void);
@@ -198,6 +204,7 @@ Error_Handler();
   MX_TIM3_Init();
   MX_JPEG_Init();
   MX_TIM2_Init();
+  MX_DFSDM1_Init();
   /* USER CODE BEGIN 2 */
 
   /* Setup power supply rails
@@ -300,7 +307,8 @@ Error_Handler();
     wifi_poll();
 
     /* Wake the camera for viewers, put it back to sleep when they're gone */
-    int watched = (http_stream_clients() > 0) || CDC_Port_Is_Open();
+    int watched = (http_stream_clients() > 0) || (http_stream_audio_clients() > 0) ||
+                  CDC_Port_Is_Open();
     if (watched)
     {
       last_watched = HAL_GetTick();
@@ -310,10 +318,12 @@ Error_Handler();
       cam_status = camera_wake(frame_buf, frame_buf2);
       cam_awake = (cam_status == CAMERA_OK);
       cam_frames_last = 0;
+      audio_start();
     }
     else if (cam_awake && !watched && ((HAL_GetTick() - last_watched) > IDLE_AFTER_MS))
     {
       camera_sleep();
+      audio_stop();
       cam_awake = 0;
       HAL_GPIO_WritePin(LED_G_GPIO_Port, LED_G_Pin, GPIO_PIN_SET);  // green off
     }
@@ -358,6 +368,16 @@ Error_Handler();
       }
     }
 
+    /* Microphone -> WebSocket listeners; without listeners, discard the samples */
+    if (http_stream_audio_clients() > 0)
+    {
+      http_stream_audio_pump();
+    }
+    else
+    {
+      audio_flush();
+    }
+
     /* Status line once a second (also repeats the init results for late viewers) */
     if ((HAL_GetTick() - stat_tick) >= 1000U)
     {
@@ -384,6 +404,15 @@ Error_Handler();
       {
         usb_link_log("wifi start=%d: %s", wifi_status, wifi_status_text());
       }
+      int mic_peak_db;
+      uint32_t mic_dropped;
+      audio_take_stats(&mic_peak_db, &mic_dropped);
+      uint32_t ws_sent, ws_skipped;
+      http_stream_take_audio_stats(&ws_sent, &ws_skipped);
+      usb_link_log("mic: %s | peak %d dBFS | dropped blocks %lu | %d audio listener(s), "
+                   "%lu msgs sent, %lu skipped",
+                   audio_running() ? "on" : "off", mic_peak_db, mic_dropped,
+                   http_stream_audio_clients(), ws_sent, ws_skipped);
       cam_frames_last = cam_frames;
       sent = dropped = jpeg_errors = 0;
       bytes_sum = enc_ms_sum = 0;
@@ -499,6 +528,59 @@ static void MX_DCMI_Init(void)
   /* USER CODE BEGIN DCMI_Init 2 */
 
   /* USER CODE END DCMI_Init 2 */
+
+}
+
+/**
+  * @brief DFSDM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_DFSDM1_Init(void)
+{
+
+  /* USER CODE BEGIN DFSDM1_Init 0 */
+
+  /* USER CODE END DFSDM1_Init 0 */
+
+  /* USER CODE BEGIN DFSDM1_Init 1 */
+
+  /* USER CODE END DFSDM1_Init 1 */
+  hdfsdm1_filter0.Instance = DFSDM1_Filter0;
+  hdfsdm1_filter0.Init.RegularParam.Trigger = DFSDM_FILTER_SW_TRIGGER;
+  hdfsdm1_filter0.Init.RegularParam.FastMode = ENABLE;
+  hdfsdm1_filter0.Init.RegularParam.DmaMode = ENABLE;
+  hdfsdm1_filter0.Init.FilterParam.SincOrder = DFSDM_FILTER_FASTSINC_ORDER;
+  hdfsdm1_filter0.Init.FilterParam.Oversampling = 125;
+  hdfsdm1_filter0.Init.FilterParam.IntOversampling = 1;
+  if (HAL_DFSDM_FilterInit(&hdfsdm1_filter0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  hdfsdm1_channel2.Instance = DFSDM1_Channel2;
+  hdfsdm1_channel2.Init.OutputClock.Activation = ENABLE;
+  hdfsdm1_channel2.Init.OutputClock.Selection = DFSDM_CHANNEL_OUTPUT_CLOCK_SYSTEM;
+  hdfsdm1_channel2.Init.OutputClock.Divider = 60;
+  hdfsdm1_channel2.Init.Input.Multiplexer = DFSDM_CHANNEL_EXTERNAL_INPUTS;
+  hdfsdm1_channel2.Init.Input.DataPacking = DFSDM_CHANNEL_STANDARD_MODE;
+  hdfsdm1_channel2.Init.Input.Pins = DFSDM_CHANNEL_SAME_CHANNEL_PINS;
+  hdfsdm1_channel2.Init.SerialInterface.Type = DFSDM_CHANNEL_SPI_RISING;
+  hdfsdm1_channel2.Init.SerialInterface.SpiClock = DFSDM_CHANNEL_SPI_CLOCK_INTERNAL;
+  hdfsdm1_channel2.Init.Awd.FilterOrder = DFSDM_CHANNEL_FASTSINC_ORDER;
+  hdfsdm1_channel2.Init.Awd.Oversampling = 1;
+  hdfsdm1_channel2.Init.Offset = 0;
+  hdfsdm1_channel2.Init.RightBitShift = 0x00;
+  if (HAL_DFSDM_ChannelInit(&hdfsdm1_channel2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_DFSDM_FilterConfigRegChannel(&hdfsdm1_filter0, DFSDM_CHANNEL_2, DFSDM_CONTINUOUS_CONV_ON) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN DFSDM1_Init 2 */
+
+  /* USER CODE END DFSDM1_Init 2 */
 
 }
 
@@ -767,8 +849,12 @@ static void MX_DMA_Init(void)
 
   /* DMA controller clock enable */
   __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);

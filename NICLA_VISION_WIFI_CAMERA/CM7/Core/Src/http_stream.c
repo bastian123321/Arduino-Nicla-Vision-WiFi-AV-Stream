@@ -3,7 +3,9 @@
  *
  * Each connection reads one request line. "/" returns a static page,
  * "/stream" switches the connection to an endless multipart MJPEG response,
- * "/snapshot.jpg" waits for the next frame and returns it.
+ * "/snapshot.jpg" waits for the next frame and returns it, and "/audio" is
+ * a WebSocket that carries the microphone as 16 kHz 16-bit PCM (binary
+ * messages of 20 ms each), played by the page's JavaScript.
  *
  * Frames are queued with TCP_WRITE_FLAG_COPY as far as the send buffer
  * allows; the rest follows from the sent/poll callbacks. A new frame is only
@@ -11,14 +13,17 @@
  * lowers the frame rate instead of building up delay.
  */
 #include "http_stream.h"
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include "main.h"
 #include "lwip/tcp.h"
+#include "audio.h"
+#include "ws_util.h"
 
 #define HTTP_PORT           80
-#define MAX_CLIENTS         3
-#define REQ_MAX             384
+#define MAX_CLIENTS         5        /* e.g. 2 pages, each with video + audio */
+#define REQ_MAX             1024     /* WebSocket requests carry all headers */
 #define REQ_TIMEOUT_MS      5000U    /* request line must arrive within this */
 #define STALL_TIMEOUT_MS    10000U   /* drop a client that stops taking data */
 
@@ -28,6 +33,7 @@ typedef enum
   C_REQUEST,      /* reading the request */
   C_STREAM,       /* MJPEG: sends every frame */
   C_SNAPSHOT,     /* waits for one frame, then closes */
+  C_AUDIO,        /* WebSocket: receives every audio block */
   C_CLOSING,      /* close once everything was sent */
 } client_state_t;
 
@@ -70,11 +76,58 @@ static const char PAGE[] =
   "justify-content:center;gap:12px;background:#111;color:#ccc;font:14px system-ui,sans-serif}"
   "img{width:min(96vw,960px);aspect-ratio:4/3;background:#000;image-rendering:auto}"
   "a{color:#8ab4f8}"
+  "button{font:inherit;color:#eee;background:#333;border:1px solid #555;border-radius:6px;"
+  "padding:6px 14px;cursor:pointer}"
   "</style></head><body>"
   "<img src=\"/stream\" alt=\"camera stream\">"
-  "<div>Nicla Vision &middot; 320&times;240 MJPEG &middot; "
+  "<div><button id=\"a\">Audio on</button> &middot; Nicla Vision &middot; 320&times;240 MJPEG"
+  " + 16 kHz audio &middot; "
   "<a href=\"/snapshot.jpg\">snapshot</a> &middot; <a href=\"/stream\">raw stream</a></div>"
+  /*
+   * Audio player. Browsers only allow sound after a click, hence the button.
+   *
+   * The page resamples the 16 kHz PCM to the output rate itself (linear
+   * interpolation that carries its phase and last sample across messages)
+   * and schedules each AudioBuffer at an exact integer sample position right
+   * after the previous one. Letting the browser resample every 20 ms block
+   * separately, at fractional start times, left a one-sample glitch at each
+   * block boundary: 50 clicks per second, heard as static.
+   *
+   * Playback starts 200 ms ahead with a 10 ms fade-in; a late message
+   * re-buffers once by 150 ms, and a message that would put the schedule
+   * more than 500 ms ahead is dropped. AudioWorklet would need HTTPS; this
+   * works on plain HTTP.
+   */
+  "<script>"
+  "var b=document.getElementById('a'),ctx=null,ws=null,rate=0,next=0,ph=0,last=0,fade=1;"
+  "function stop(){if(ws){ws.onclose=null;ws.close();ws=null;}"
+  "if(ctx){ctx.close();ctx=null;}b.textContent='Audio on';}"
+  "function play(s){var n=s.length,R=16000/rate,o=new Float32Array(Math.ceil((n-ph)/R)+1),k=0;"
+  "while(ph<n){var i=Math.floor(ph),f=ph-i,p=i?s[i-1]:last,c=s[i];o[k++]=(p+(c-p)*f)/32768;ph+=R;}"
+  "ph-=n;last=s[n-1];if(!k)return;"
+  "var now=Math.round(ctx.currentTime*rate);"
+  "if(next===0){next=now+Math.round(0.2*rate);fade=1;}"
+  "else if(next<now){next=now+Math.round(0.15*rate);fade=1;}"
+  "else if(next>now+0.5*rate)return;"
+  "if(fade){var L=Math.min(k,Math.round(0.01*rate));for(var j=0;j<L;j++)o[j]*=j/L;fade=0;}"
+  "var buf=ctx.createBuffer(1,k,rate);buf.getChannelData(0).set(o.subarray(0,k));"
+  "var src=ctx.createBufferSource();src.buffer=buf;src.connect(ctx.destination);"
+  "src.start(next/rate);next+=k;}"
+  "b.onclick=function(){if(ctx){stop();return;}"
+  "ctx=new(window.AudioContext||window.webkitAudioContext)();rate=ctx.sampleRate;"
+  "next=0;ph=0;last=0;fade=1;"
+  "ws=new WebSocket('ws://'+location.host+'/audio');ws.binaryType='arraybuffer';"
+  "ws.onmessage=function(e){if(ctx)play(new Int16Array(e.data));};"
+  "ws.onclose=stop;b.textContent='Audio off';};"
+  "</script>"
   "</body></html>";
+
+static const char WS_BAD_REQUEST[] =
+  "HTTP/1.1 400 Bad Request\r\n"
+  "Content-Type: text/plain\r\n"
+  "Connection: close\r\n"
+  "\r\n"
+  "WebSocket handshake expected\n";
 
 static const char STREAM_HEADER[] =
   "HTTP/1.1 200 OK\r\n"
@@ -216,12 +269,75 @@ static void client_start_frame(client_t *c)
   client_pump(c);
 }
 
+static int is_audio_request(const char *req)
+{
+  return strncmp(req, "GET /audio", 10) == 0;
+}
+
+/* Find a header value (case-insensitive name) in the request; returns its length */
+static size_t find_header(const char *req, const char *name, const char **value)
+{
+  size_t name_len = strlen(name);
+
+  for (const char *line = strstr(req, "\r\n"); line != NULL; line = strstr(line, "\r\n"))
+  {
+    line += 2;
+    size_t i = 0;
+    while ((i < name_len) && (line[i] != '\0') &&
+           (tolower((unsigned char)line[i]) == tolower((unsigned char)name[i])))
+    {
+      i++;
+    }
+    if ((i == name_len) && (line[i] == ':'))
+    {
+      const char *v = line + i + 1;
+      while (*v == ' ')
+      {
+        v++;
+      }
+      const char *end = strstr(v, "\r\n");
+      *value = v;
+      return (end != NULL) ? (size_t)(end - v) : strlen(v);
+    }
+  }
+  return 0;
+}
+
+/* Switch to WebSocket (RFC 6455 handshake) for the audio stream */
+static void client_start_audio(client_t *c)
+{
+  struct tcp_pcb *pcb = c->pcb;
+  const char *key = NULL;
+  size_t key_len = find_header(c->req, "Sec-WebSocket-Key", &key);
+  char accept[29];
+  char resp[160];
+
+  if ((key_len == 0U) || (ws_accept_key(key, key_len, accept) != 0))
+  {
+    tcp_write(pcb, WS_BAD_REQUEST, sizeof(WS_BAD_REQUEST) - 1U, 0);
+    tcp_output(pcb);
+    c->state = C_CLOSING;
+    return;
+  }
+
+  int n = snprintf(resp, sizeof(resp),
+                   "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                   "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept);
+  tcp_write(pcb, resp, (u16_t)n, TCP_WRITE_FLAG_COPY);
+  tcp_output(pcb);
+  c->state = C_AUDIO;
+}
+
 /* Act on a complete request line */
 static void client_handle_request(client_t *c)
 {
   struct tcp_pcb *pcb = c->pcb;
 
-  if ((strncmp(c->req, "GET /stream", 11) == 0) || (strncmp(c->req, "GET /mjpeg", 10) == 0))
+  if (is_audio_request(c->req))
+  {
+    client_start_audio(c);
+  }
+  else if ((strncmp(c->req, "GET /stream", 11) == 0) || (strncmp(c->req, "GET /mjpeg", 10) == 0))
   {
     tcp_write(pcb, STREAM_HEADER, sizeof(STREAM_HEADER) - 1U, 0);
     tcp_output(pcb);
@@ -275,10 +391,25 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     c->req_len += n;
     c->req[c->req_len] = '\0';
 
-    /* The first line ("GET /path HTTP/1.1") is all we need */
-    if ((strstr(c->req, "\r\n") != NULL) || (c->req_len >= (sizeof(c->req) - 1U)))
+    /*
+     * The first line ("GET /path HTTP/1.1") is all we need, except for the
+     * WebSocket, whose key is in a header further down.
+     */
+    int complete = is_audio_request(c->req) ? (strstr(c->req, "\r\n\r\n") != NULL)
+                                            : (strstr(c->req, "\r\n") != NULL);
+    if (complete || (c->req_len >= (sizeof(c->req) - 1U)))
     {
       client_handle_request(c);
+    }
+  }
+  else if (c->state == C_AUDIO)
+  {
+    /* The page never sends data; a close frame (opcode 8) ends the stream */
+    uint8_t first = pbuf_get_at(p, 0);
+    if ((first & 0x0FU) == 0x08U)
+    {
+      pbuf_free(p);
+      return client_close(c);
     }
   }
   /* Anything a stream client sends later is ignored */
@@ -325,7 +456,8 @@ static err_t on_poll(void *arg, struct tcp_pcb *pcb)
 
   client_pump(c);
 
-  if ((c->sending || (c->state == C_CLOSING)) && ((now - c->progress_tick) > STALL_TIMEOUT_MS))
+  if ((c->sending || (c->state == C_CLOSING) || (c->state == C_AUDIO)) &&
+      ((now - c->progress_tick) > STALL_TIMEOUT_MS))
   {
     tcp_abort(pcb);           /* client stopped reading */
     client_free(c);
@@ -465,4 +597,82 @@ int http_stream_clients(void)
     }
   }
   return n;
+}
+
+int http_stream_audio_clients(void)
+{
+  int n = 0;
+  for (int i = 0; i < MAX_CLIENTS; i++)
+  {
+    if (clients[i].state == C_AUDIO)
+    {
+      n++;
+    }
+  }
+  return n;
+}
+
+/* Audio messages sent / skipped since the last http_stream_take_audio_stats() */
+static uint32_t audio_msgs_sent;
+static uint32_t audio_msgs_skipped;
+
+/* At most this many 20 ms blocks per WebSocket message (100 ms) */
+#define AUDIO_MAX_BLOCKS_PER_MSG    5U
+
+/*
+ * Send the complete 20 ms blocks from the microphone FIFO to all WebSocket
+ * listeners. Normally that is one block per message; when blocks have piled
+ * up (e.g. while a new TCP connection is still ramping up), up to
+ * AUDIO_MAX_BLOCKS_PER_MSG go into one message, so fewer, larger segments are
+ * in flight. A listener whose send buffer is full misses the message (a short
+ * gap) rather than delaying the others.
+ */
+void http_stream_audio_pump(void)
+{
+  /* 4-byte WebSocket header followed by the PCM samples, sent with one tcp_write */
+  static uint8_t msg[4U + (AUDIO_MAX_BLOCKS_PER_MSG * AUDIO_BLOCK_SAMPLES * 2U)] __attribute__((aligned(4)));
+
+  while (audio_available() >= AUDIO_BLOCK_SAMPLES)
+  {
+    uint32_t blocks = audio_available() / AUDIO_BLOCK_SAMPLES;
+    if (blocks > AUDIO_MAX_BLOCKS_PER_MSG)
+    {
+      blocks = AUDIO_MAX_BLOCKS_PER_MSG;
+    }
+    uint32_t samples = audio_read((int16_t *)(void *)(msg + 4), blocks * AUDIO_BLOCK_SAMPLES);
+    u16_t payload = (u16_t)(samples * 2U);
+
+    /* FIN + binary opcode, 126 = 16-bit extended length (server frames are unmasked) */
+    msg[0] = 0x82;
+    msg[1] = 126;
+    msg[2] = (uint8_t)(payload >> 8);
+    msg[3] = (uint8_t)payload;
+    u16_t len = (u16_t)(4U + payload);
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+      client_t *c = &clients[i];
+      if (c->state != C_AUDIO)
+      {
+        continue;
+      }
+      if ((tcp_sndbuf(c->pcb) < len) || (tcp_sndqueuelen(c->pcb) >= (TCP_SND_QUEUELEN - 2)) ||
+          (tcp_write(c->pcb, msg, len, TCP_WRITE_FLAG_COPY) != ERR_OK))
+      {
+        audio_msgs_skipped++;
+        continue;
+      }
+      audio_msgs_sent++;
+      c->progress_tick = HAL_GetTick();
+      tcp_output(c->pcb);
+    }
+  }
+}
+
+void http_stream_take_audio_stats(uint32_t *sent, uint32_t *skipped)
+{
+  *sent = audio_msgs_sent;
+  *skipped = audio_msgs_skipped;
+  audio_msgs_sent = 0;
+  audio_msgs_skipped = 0;
 }

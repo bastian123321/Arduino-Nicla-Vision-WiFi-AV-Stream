@@ -4,6 +4,7 @@
  *   /              page showing the live stream
  *   /stream        MJPEG stream (multipart/x-mixed-replace), for browsers/VLC/OpenCV
  *   /snapshot.jpg  one JPEG frame
+ *   /audio         WebSocket with the microphone (16 kHz 16-bit PCM, 20 ms messages)
  *
  * All functions run from the main loop (lwIP NO_SYS).
  */
@@ -29,5 +30,14 @@ void http_stream_submit(const uint8_t *jpeg, uint32_t len);
 
 /* Number of connected stream/snapshot clients */
 int http_stream_clients(void);
+
+/* Number of connected audio (WebSocket) listeners */
+int http_stream_audio_clients(void);
+
+/* Send all complete audio blocks from the microphone FIFO to the listeners */
+void http_stream_audio_pump(void);
+
+/* Audio messages sent / skipped (send buffer full) since the last call */
+void http_stream_take_audio_stats(uint32_t *sent, uint32_t *skipped);
 
 #endif /* HTTP_STREAM_H */

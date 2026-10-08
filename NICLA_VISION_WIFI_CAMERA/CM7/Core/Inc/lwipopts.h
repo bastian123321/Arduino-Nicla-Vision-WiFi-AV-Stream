@@ -21,7 +21,7 @@
 #define MEM_SIZE                        (48 * 1024)   /* heap for TX segments */
 #define MEMP_NUM_PBUF                   32
 #define PBUF_POOL_SIZE                  24            /* RX buffers */
-#define MEMP_NUM_TCP_PCB                6
+#define MEMP_NUM_TCP_PCB                10            /* 5 HTTP clients + closing ones */
 #define MEMP_NUM_TCP_PCB_LISTEN         2
 #define MEMP_NUM_UDP_PCB                5             /* DHCP + mDNS + spare */
 /* lwIP's own timers plus mDNS probing/announcing */
