@@ -65,10 +65,10 @@ Steps:
 
 1. `git clone https://github.com/bastian123321/Arduino-Nicla-Vision-WiFi-AV-Stream.git`
 2. **WiFi credentials**: copy
-   `NICLA_VISION_WIFI_CAMERA/CM7/Core/Inc/wifi_secrets.example.h` to
+   `NICLA_VISION_WIFI_AV_STREAM/CM7/Core/Inc/wifi_secrets.example.h` to
    `wifi_secrets.h` in the same folder and enter your network name and password.
    `wifi_secrets.h` is in `.gitignore`, so it never gets committed.
-3. Import `NICLA_VISION_WIFI_CAMERA` into STM32CubeIDE (*File → Import → Existing
+3. Import `NICLA_VISION_WIFI_AV_STREAM` into STM32CubeIDE (*File → Import → Existing
    Projects into Workspace*, tick the `_CM7` and `_CM4` projects).
 4. Build both cores (**Ctrl+B**). The CM7 image is about 520 KB, mostly the WiFi
    chip firmware. The CM7 project is set to `-O2` in both the Debug and Release
@@ -234,7 +234,7 @@ USB COM port. To watch them:
 
 ```powershell
 pip install pyserial numpy opencv-python
-python NICLA_VISION_WIFI_CAMERA/tools/camera_viewer.py
+python NICLA_VISION_WIFI_AV_STREAM/tools/camera_viewer.py
 ```
 
 ```
