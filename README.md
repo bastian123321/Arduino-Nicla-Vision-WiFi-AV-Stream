@@ -1,10 +1,10 @@
-# Arduino Nicla Vision – WiFi camera (STM32CubeIDE, bare metal)
+# Arduino Nicla Vision – WiFi audio/video stream (STM32CubeIDE, bare metal)
 
 An STM32CubeIDE (HAL) project that turns the **Arduino Nicla Vision**
-(STM32H747AII6) into a WiFi camera. The board joins your WiFi network and
-streams the camera as MJPEG, plus the microphone as live audio. You open it in any browser, with no app or driver
-on the PC. It's flashed through the stock **Arduino bootloader over USB**, so no
-ST-Link is needed.
+(STM32H747AII6) into a WiFi camera with sound. The board joins your WiFi
+network and streams the camera as MJPEG, plus the microphone as live audio.
+You open it in any browser, with no app or driver on the PC. It's flashed
+through the stock **Arduino bootloader over USB**, so no ST-Link is needed.
 
 It is built on the
 [Arduino Nicla Vision STM32CubeIDE template](https://github.com/bastian123321/Arduino-Nicla-Vision-STM32CUBEIDE-Template)
@@ -63,7 +63,7 @@ You need:
 
 Steps:
 
-1. `git clone https://github.com/bastian123321/Arduino-Nicla-Vision-WiFi-Camera.git`
+1. `git clone https://github.com/bastian123321/Arduino-Nicla-Vision-WiFi-AV-Stream.git`
 2. **WiFi credentials**: copy
    `NICLA_VISION_WIFI_CAMERA/CM7/Core/Inc/wifi_secrets.example.h` to
    `wifi_secrets.h` in the same folder and enter your network name and password.
