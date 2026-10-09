@@ -103,6 +103,15 @@ int main(void)
   MX_DMA_Init();
   /* USER CODE BEGIN 2 */
 
+  /*
+   * The M4 has no work in this project (everything runs on the M7). Instead of
+   * spinning in the empty loop at full speed, it stops its SysTick and sleeps
+   * in CStop with no wake-up source enabled. This only stops the M4 core: the
+   * D2 domain keeps running because the M7 uses peripherals in it (SDMMC2,
+   * DMA, DCMI, ...). Put your own M4 code here instead if you need the core.
+   */
+  HAL_SuspendTick();
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -112,6 +121,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Back to sleep if anything ever wakes the core */
+    HAL_PWREx_EnterSTOPMode(PWR_MAINREGULATOR_ON, PWR_STOPENTRY_WFI, PWR_D2_DOMAIN);
   }
   /* USER CODE END 3 */
 }

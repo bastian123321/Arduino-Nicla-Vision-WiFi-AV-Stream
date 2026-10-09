@@ -23,7 +23,9 @@ PDM microphone --DFSDM1 + DMA--> 16 kHz 16-bit PCM --WebSocket /audio--> page pl
   and the stream adapts to the WiFi speed instead of building up delay.
 * **Audio**: the on-board microphone at 16 kHz, played by the page after a
   click on **Audio on**, about 0.2 s behind the video.
-* Bare metal, no RTOS: everything runs from the CM7 main loop. The CM4 is unused.
+* Bare metal, no RTOS: everything runs from the CM7 main loop. The CM4 has no
+  work and sleeps in stop mode right after boot (`CM4/Core/Src/main.c`), so it
+  doesn't spin and heat the board. Put your own CM4 code there if you need it.
 * All hardware is configured in the `.ioc`, so you can review and change it
   from CubeMX.
 * Found by name: the board answers **`nicla-vision.local`** (mDNS), so you
