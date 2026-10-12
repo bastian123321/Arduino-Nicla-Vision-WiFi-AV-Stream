@@ -97,8 +97,9 @@ int wifi_store_save(const wifi_credentials_t *in)
   memset(&buf.rec, 0, sizeof(buf.rec));
   buf.rec.magic = STORE_MAGIC;
   buf.rec.version = STORE_VERSION;
-  strncpy(buf.rec.cred.ssid, in->ssid, WIFI_SSID_MAX);
-  strncpy(buf.rec.cred.pass, in->pass, WIFI_PASS_MAX);
+  /* The record was zeroed above, so the copies stay terminated */
+  memcpy(buf.rec.cred.ssid, in->ssid, strnlen(in->ssid, WIFI_SSID_MAX));
+  memcpy(buf.rec.cred.pass, in->pass, strnlen(in->pass, WIFI_PASS_MAX));
   buf.rec.crc = crc32(&buf.rec, offsetof(record_t, crc));
 
   HAL_FLASH_Unlock();

@@ -235,6 +235,26 @@ static int saved_network_in_range(void)
   return 0;
 }
 
+/* ---- Power save ------------------------------------------------------------- */
+
+/*
+ * "Performance" power save for the station: the radio sleeps between packets
+ * but wakes for every beacon (DTIM 1) and stays awake 200 ms after traffic,
+ * so streaming throughput is unaffected while idle draws far less.
+ *
+ * Applied again whenever the hotspot opens or closes and after every join:
+ * the firmware doesn't reliably restore it after AP+STA operation. The value
+ * read back is logged so the USB log shows what the chip actually uses.
+ */
+static uint32_t pm_readback;     /* last power-save value read from the chip */
+
+static void apply_pm(const char *why)
+{
+  cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  cyw43_wifi_get_pm(&cyw43_state, &pm_readback);
+  usb_link_log("wifi: power save 0x%06lx (%s)", (unsigned long)pm_readback, why);
+}
+
 /* ---- Hotspot ---------------------------------------------------------------- */
 
 static void hotspot_start(void)
@@ -264,6 +284,7 @@ static void hotspot_start(void)
   ap_off_at = 0;
   retry_tick = HAL_GetTick();
   HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_RESET);   /* blue on */
+  apply_pm("hotspot on");
   usb_link_log("wifi: hotspot \"%s\" on (password %s), setup at http://%s/",
                ap_ssid, WIFI_AP_PASSWORD, ip4addr_ntoa(netif_ip4_addr(ap)));
 }
@@ -282,6 +303,7 @@ static void hotspot_stop(void)
   ap_off_at = 0;
   HAL_GPIO_WritePin(LED_B_GPIO_Port, LED_B_Pin, GPIO_PIN_SET);     /* blue off */
   usb_link_log("wifi: hotspot off");
+  apply_pm("hotspot off");
 }
 
 /* ---- Station ---------------------------------------------------------------- */
@@ -332,12 +354,7 @@ int wifi_start(void)
     return -1;
   }
 
-  /*
-   * "Performance" power save (the driver's default): the radio sleeps between
-   * packets but wakes for every beacon (DTIM 1) and stays awake 200 ms after
-   * traffic, so streaming throughput is unaffected while idle draws far less.
-   */
-  cyw43_wifi_pm(&cyw43_state, CYW43_PERFORMANCE_PM);
+  apply_pm("start");
   mdns_start();
 
   uint8_t mac[6];
@@ -444,6 +461,7 @@ void wifi_poll(void)
         last_error[0] = '\0';
         netif_set_default(&cyw43_state.netif[CYW43_ITF_STA]);
         usb_link_log("wifi: %s", wifi_status_text());
+        apply_pm("joined");
         if (ap_on)
         {
           ap_off_at = now + HOTSPOT_OFF_DELAY_MS;
@@ -612,8 +630,9 @@ const char *wifi_status_text(void)
       break;
     case ST_UP:
       cyw43_wifi_get_rssi(&cyw43_state, &rssi);
-      snprintf(status_text, sizeof(status_text), "up %s rssi %ld on \"%s\"%s", wifi_ip_text(),
-               (long)rssi, saved.ssid, ap_on ? " (hotspot closing)" : "");
+      snprintf(status_text, sizeof(status_text), "up %s rssi %ld on \"%s\" pm 0x%06lx%s",
+               wifi_ip_text(), (long)rssi, saved.ssid, (unsigned long)pm_readback,
+               ap_on ? " (hotspot closing)" : "");
       break;
     case ST_HOTSPOT:
       snprintf(status_text, sizeof(status_text), "hotspot \"%s\" at 192.168.4.1%s%s", ap_ssid,
