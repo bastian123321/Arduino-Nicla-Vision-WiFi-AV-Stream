@@ -15,5 +15,5 @@ Release/
 .metadata/
 *.launch.bak
 
-# Local WiFi credentials (see Core/Inc/wifi_secrets.example.h)
+# Old local WiFi credentials file (no longer used: the network is set from the setup hotspot)
 wifi_secrets.h

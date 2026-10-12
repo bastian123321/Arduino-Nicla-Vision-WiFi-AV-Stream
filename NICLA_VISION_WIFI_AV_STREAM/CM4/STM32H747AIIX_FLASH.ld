@@ -41,9 +41,11 @@ _Min_Heap_Size = 0x200;      /* required amount of heap  */
 _Min_Stack_Size = 0x400; /* required amount of stack */
 
 /* Specify the memory areas */
+/* The last 128 KB sector of bank 2 (0x081E0000) holds the WiFi settings
+ * written by the CM7 (wifi_store.c), so the CM4 image must stay below it. */
 MEMORY
 {
-FLASH (rx)     : ORIGIN = 0x08100000, LENGTH = 1024K
+FLASH (rx)     : ORIGIN = 0x08100000, LENGTH = 896K
 RAM (xrw)      : ORIGIN = 0x10000000, LENGTH = 288K
 }
 

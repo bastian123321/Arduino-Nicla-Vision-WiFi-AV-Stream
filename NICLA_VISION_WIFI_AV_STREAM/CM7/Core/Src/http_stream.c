@@ -1,11 +1,16 @@
 /*
  * Tiny HTTP server for the camera (lwIP raw TCP API, port 80)
  *
- * Each connection reads one request line. "/" returns a static page,
+ * Each connection reads one request. "/" returns the camera page,
  * "/stream" switches the connection to an endless multipart MJPEG response,
  * "/snapshot.jpg" waits for the next frame and returns it, and "/audio" is
  * a WebSocket that carries the microphone as 16 kHz 16-bit PCM (binary
- * messages of 20 ms each), played by the page's JavaScript.
+ * messages of 20 ms each), played by the page's JavaScript. "/setup" is the
+ * WiFi setup page (wifi_portal.c).
+ *
+ * Over the setup hotspot, "/" is the setup page and requests for any other
+ * host name are redirected to it: that is what makes phones and laptops pop
+ * up the page when they join the hotspot (captive portal).
  *
  * Frames are queued with TCP_WRITE_FLAG_COPY as far as the send buffer
  * allows; the rest follows from the sent/poll callbacks. A new frame is only
@@ -20,11 +25,13 @@
 #include "lwip/tcp.h"
 #include "audio.h"
 #include "ws_util.h"
+#include "wifi_portal.h"
 
 #define HTTP_PORT           80
 #define MAX_CLIENTS         5        /* e.g. 2 pages, each with video + audio */
 #define REQ_MAX             1024     /* WebSocket requests carry all headers */
-#define REQ_TIMEOUT_MS      5000U    /* request line must arrive within this */
+#define REQ_TIMEOUT_MS      5000U    /* request must arrive within this */
+#define RESP_MAX            6144     /* setup pages are built here */
 #define STALL_TIMEOUT_MS    10000U   /* drop a client that stops taking data */
 
 typedef enum
@@ -62,6 +69,9 @@ static uint32_t frame_len;
 
 static const char TAIL[] = "\r\n";
 
+/* Shared by all connections: a built page is copied into lwIP as soon as it's ready */
+static char resp_buf[RESP_MAX];
+
 static const char PAGE[] =
   "HTTP/1.1 200 OK\r\n"
   "Content-Type: text/html; charset=utf-8\r\n"
@@ -82,7 +92,8 @@ static const char PAGE[] =
   "<img src=\"/stream\" alt=\"camera stream\">"
   "<div><button id=\"a\">Audio on</button> &middot; Nicla Vision &middot; 320&times;240 MJPEG"
   " + 16 kHz audio &middot; "
-  "<a href=\"/snapshot.jpg\">snapshot</a> &middot; <a href=\"/stream\">raw stream</a></div>"
+  "<a href=\"/snapshot.jpg\">snapshot</a> &middot; <a href=\"/stream\">raw stream</a> &middot; "
+  "<a href=\"/setup\">WiFi setup</a></div>"
   /*
    * Audio player. Browsers only allow sound after a click, hence the button.
    *
@@ -143,7 +154,7 @@ static const char NOT_FOUND[] =
   "Content-Type: text/plain\r\n"
   "Connection: close\r\n"
   "\r\n"
-  "Not found. Try / or /stream\n";
+  "Not found. Try /, /stream or /setup\n";
 
 /* ---- Connection helpers ------------------------------------------------- */
 
@@ -328,26 +339,105 @@ static void client_start_audio(client_t *c)
   c->state = C_AUDIO;
 }
 
-/* Act on a complete request line */
+/* Is the request "<method> <path>" (path followed by a space, '?', '/' or '.')? */
+static int path_is(const char *req, const char *method, const char *path)
+{
+  size_t m = strlen(method);
+  size_t n = strlen(path);
+  if ((strncmp(req, method, m) != 0) || (req[m] != ' ') || (strncmp(req + m + 1U, path, n) != 0))
+  {
+    return 0;
+  }
+  char next = req[m + 1U + n];
+  return (next == ' ') || (next == '?') || (next == '/') || (next == '.');
+}
+
+/* Request body (after the blank line) and its length */
+static const char *request_body(const client_t *c, size_t *len)
+{
+  const char *end = strstr(c->req, "\r\n\r\n");
+  if (end == NULL)
+  {
+    *len = 0;
+    return "";
+  }
+  end += 4;
+  *len = (size_t)((c->req + c->req_len) - end);
+  return end;
+}
+
+/* Send a page built in resp_buf (copied into lwIP right away), then close */
+static void client_send_built(client_t *c, size_t len)
+{
+  if (len > 0U)
+  {
+    tcp_write(c->pcb, resp_buf, (u16_t)len, TCP_WRITE_FLAG_COPY);
+    tcp_output(c->pcb);
+  }
+  c->state = C_CLOSING;
+}
+
+/* Over the hotspot, any host name other than the board's address is a captive-portal check */
+static int is_foreign_host(const client_t *c)
+{
+  const char *host = NULL;
+  size_t len = find_header(c->req, "Host", &host);
+  const char *ip = wifi_portal_ip_text();
+  size_t ip_len = strlen(ip);
+
+  if (len == 0U)
+  {
+    return 0;
+  }
+  /* "192.168.4.1" or "192.168.4.1:80" is ours */
+  return !((len >= ip_len) && (strncmp(host, ip, ip_len) == 0) &&
+           ((len == ip_len) || (host[ip_len] == ':')));
+}
+
+/* Act on a complete request */
 static void client_handle_request(client_t *c)
 {
   struct tcp_pcb *pcb = c->pcb;
+  int hotspot = wifi_portal_is_hotspot_addr(&pcb->local_ip);
 
-  if (is_audio_request(c->req))
+  if (hotspot && is_foreign_host(c))
+  {
+    client_send_built(c, wifi_portal_redirect(resp_buf, sizeof(resp_buf)));
+  }
+  else if (path_is(c->req, "POST", "/save"))
+  {
+    size_t body_len;
+    const char *body = request_body(c, &body_len);
+    client_send_built(c, wifi_portal_save(resp_buf, sizeof(resp_buf), body, body_len));
+  }
+  else if (path_is(c->req, "POST", "/forget"))
+  {
+    client_send_built(c, wifi_portal_forget(resp_buf, sizeof(resp_buf)));
+  }
+  else if (path_is(c->req, "GET", "/rescan"))
+  {
+    client_send_built(c, wifi_portal_rescan(resp_buf, sizeof(resp_buf)));
+  }
+  else if (path_is(c->req, "GET", "/setup") || (hotspot && path_is(c->req, "GET", "/")))
+  {
+    client_send_built(c, wifi_portal_page(resp_buf, sizeof(resp_buf), 0));
+  }
+  else if (is_audio_request(c->req))
   {
     client_start_audio(c);
   }
-  else if ((strncmp(c->req, "GET /stream", 11) == 0) || (strncmp(c->req, "GET /mjpeg", 10) == 0))
+  else if (path_is(c->req, "GET", "/stream") || path_is(c->req, "GET", "/mjpeg"))
   {
     tcp_write(pcb, STREAM_HEADER, sizeof(STREAM_HEADER) - 1U, 0);
     tcp_output(pcb);
     c->state = C_STREAM;            /* frames follow from http_stream_submit() */
   }
-  else if (strncmp(c->req, "GET /snapshot", 13) == 0)
+  else if (path_is(c->req, "GET", "/snapshot") || path_is(c->req, "GET", "/snapshot.jpg"))
   {
     c->state = C_SNAPSHOT;          /* waits for the next frame */
   }
-  else if ((strncmp(c->req, "GET / ", 6) == 0) || (strncmp(c->req, "GET /index", 10) == 0))
+  else if (path_is(c->req, "GET", "/") || path_is(c->req, "GET", "/index.html") ||
+           path_is(c->req, "GET", "/camera"))
   {
     tcp_write(pcb, PAGE, sizeof(PAGE) - 1U, 0);
     tcp_output(pcb);
@@ -360,6 +450,28 @@ static void client_handle_request(client_t *c)
     c->state = C_CLOSING;
   }
   c->progress_tick = HAL_GetTick();
+}
+
+/* 1 once the headers (and, for a POST, its body) have arrived */
+static int request_complete(const client_t *c)
+{
+  const char *end = strstr(c->req, "\r\n\r\n");
+  if (end == NULL)
+  {
+    return 0;
+  }
+  if (strncmp(c->req, "POST ", 5) != 0)
+  {
+    return 1;
+  }
+  const char *v = NULL;
+  size_t n = find_header(c->req, "Content-Length", &v);
+  size_t body = 0;
+  for (size_t i = 0; (i < n) && (v[i] >= '0') && (v[i] <= '9'); i++)
+  {
+    body = (body * 10U) + (size_t)(v[i] - '0');
+  }
+  return (size_t)((c->req + c->req_len) - (end + 4)) >= body;
 }
 
 /* ---- lwIP callbacks ------------------------------------------------------- */
@@ -391,13 +503,8 @@ static err_t on_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     c->req_len += n;
     c->req[c->req_len] = '\0';
 
-    /*
-     * The first line ("GET /path HTTP/1.1") is all we need, except for the
-     * WebSocket, whose key is in a header further down.
-     */
-    int complete = is_audio_request(c->req) ? (strstr(c->req, "\r\n\r\n") != NULL)
-                                            : (strstr(c->req, "\r\n") != NULL);
-    if (complete || (c->req_len >= (sizeof(c->req) - 1U)))
+    /* Headers are needed for the WebSocket key and the Host check, POSTs carry a body */
+    if (request_complete(c) || (c->req_len >= (sizeof(c->req) - 1U)))
     {
       client_handle_request(c);
     }

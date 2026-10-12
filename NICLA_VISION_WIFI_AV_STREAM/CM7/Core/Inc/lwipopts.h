@@ -23,7 +23,7 @@
 #define PBUF_POOL_SIZE                  24            /* RX buffers */
 #define MEMP_NUM_TCP_PCB                10            /* 5 HTTP clients + closing ones */
 #define MEMP_NUM_TCP_PCB_LISTEN         2
-#define MEMP_NUM_UDP_PCB                5             /* DHCP + mDNS + spare */
+#define MEMP_NUM_UDP_PCB                7             /* DHCP client/server, mDNS, captive DNS + spare */
 /* lwIP's own timers plus mDNS probing/announcing */
 #define MEMP_NUM_SYS_TIMEOUT            (LWIP_NUM_SYS_TIMEOUT_INTERNAL + 8)
 

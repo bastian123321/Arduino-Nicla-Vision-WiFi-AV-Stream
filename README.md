@@ -3,6 +3,8 @@
 An STM32CubeIDE (HAL) project that turns the **Arduino Nicla Vision**
 (STM32H747AII6) into a WiFi camera with sound. The board joins your WiFi
 network and streams the camera as MJPEG, plus the microphone as live audio.
+You set the WiFi network from your phone: the first time (or when the stored
+network isn't around) the board opens its own setup hotspot.
 You open it in any browser, with no app or driver on the PC. It's flashed
 through the stock **Arduino bootloader over USB**, so no ST-Link is needed.
 
@@ -28,6 +30,9 @@ PDM microphone --DFSDM1 + DMA--> 16 kHz 16-bit PCM --WebSocket /audio--> page pl
   doesn't spin and heat the board. Put your own CM4 code there if you need it.
 * All hardware is configured in the `.ioc`, so you can review and change it
   from CubeMX.
+* **No credentials in the code**: the board opens a setup hotspot with a
+  captive portal; the network you pick there is kept in flash and survives
+  power-off and firmware updates.
 * Found by name: the board answers **`nicla-vision.local`** (mDNS), so you
   don't need its IP address.
 * **Low power**: the CPU sleeps (`__WFI`) whenever it waits for the next frame,
@@ -66,36 +71,65 @@ You need:
 Steps:
 
 1. `git clone https://github.com/bastian123321/Arduino-Nicla-Vision-WiFi-AV-Stream.git`
-2. **WiFi credentials**: copy
-   `NICLA_VISION_WIFI_AV_STREAM/CM7/Core/Inc/wifi_secrets.example.h` to
-   `wifi_secrets.h` in the same folder and enter your network name and password.
-   `wifi_secrets.h` is in `.gitignore`, so it never gets committed.
-3. Import `NICLA_VISION_WIFI_AV_STREAM` into STM32CubeIDE (*File → Import → Existing
+2. Import `NICLA_VISION_WIFI_AV_STREAM` into STM32CubeIDE (*File → Import → Existing
    Projects into Workspace*, tick the `_CM7` and `_CM4` projects).
-4. Build both cores (**Ctrl+B**). The CM7 image is about 520 KB, mostly the WiFi
+3. Build both cores (**Ctrl+B**). The CM7 image is about 520 KB, mostly the WiFi
    chip firmware. The CM7 project is set to `-O2` in both the Debug and Release
    configurations (*Properties → C/C++ Build → Settings → MCU GCC Compiler →
    Optimization*). If you need to step through code with an ST-Link, switch to
    `-O0` temporarily.
-5. Upload: *Run → External Tools → Upload via USB (Arduino bootloader)*. If it
+4. Upload: *Run → External Tools → Upload via USB (Arduino bootloader)*. If it
    isn't in the menu yet, look under *External Tools Configurations… → Program*.
    The first time, double-tap reset first.
-6. Wait about 5 seconds for the board to join the network, then open
-   **`http://nicla-vision.local/`**. Type the `http://`, otherwise some browsers
-   start a web search.
+5. **WiFi setup** (first start only): the blue LED lights up and the board
+   opens the hotspot **`Nicla-Vision-XXXX`** (the last 4 hex digits of its
+   MAC address), password **`niclasetup`**. Join it with your phone or PC; the
+   setup page pops up by itself (if not, open `http://192.168.4.1/`). Tap your
+   network in the list, enter its password and press **Save and connect**. The
+   page shows the result; once joined, the hotspot closes 30 s later and the
+   blue LED goes off.
+6. Back on your own WiFi, open **`http://nicla-vision.local/`**. Type the
+   `http://`, otherwise some browsers start a web search.
 
 **By name or by IP**: `nicla-vision.local` works on Windows 10/11, macOS, iOS
 and Linux. On Android it depends on the browser and version. You can always
 use the IP address instead: your router's list of connected devices shows it
 (hostname `nicla-vision`), or run the [USB debug viewer](#7-usb-debug-viewer),
 which prints a line like
-`wifi: up 192.168.1.42 rssi -57 | ... | open http://nicla-vision.local/ or http://192.168.1.42/`.
+`wifi: up 192.168.1.42 rssi -57 on "MyWiFi" | ... | open http://nicla-vision.local/ or http://192.168.1.42/`.
+
+### How the board picks its network
+
+```
+power on ── network stored? ──no──────────────────────────────> setup hotspot
+               │yes                                                ^   │
+             scan ── stored network in range? ──no─────────────────┘   │ every minute: scan,
+               │yes                                                    │ join when it's back
+             join ── wrong password / no answer within 20 s ──> setup hotspot
+               │ok
+          connected ── link lost for more than 2 minutes ──> setup hotspot
+```
+
+* While the hotspot is on, the board keeps looking for the stored network
+  every minute and joins it as soon as it appears (e.g. after a router
+  restart or a power cut that brought the board up first).
+* Short drop-outs while connected are retried every 10 s without opening the
+  hotspot.
+* **Change or forget the network** at any time: `http://nicla-vision.local/setup`
+  (or the *WiFi setup* link under the video). *Forget* erases it and leaves the
+  board in hotspot mode.
+* The setup page works while connected too; anyone on your network can open
+  it, the same way they can open the camera.
+* The camera page also works over the hotspot, at `http://192.168.4.1/camera`,
+  e.g. out in the field with no router.
+* The hotspot password is `WIFI_AP_PASSWORD` in `CM7/Core/Inc/wifi.h`.
 
 ## 2. Using the stream
 
 | URL | What you get |
 |-----|--------------|
-| `http://nicla-vision.local/` | Page with the live video |
+| `http://nicla-vision.local/` | Page with the live video (also `/camera`) |
+| `http://nicla-vision.local/setup` | WiFi setup page |
 | `http://nicla-vision.local/stream` | Raw MJPEG stream (`multipart/x-mixed-replace`) |
 | `http://nicla-vision.local/snapshot.jpg` | One JPEG frame |
 | `ws://nicla-vision.local/audio` | WebSocket: microphone as 16 kHz 16-bit mono PCM (little endian), one binary message per 20 ms (up to 100 ms when catching up) |
@@ -201,10 +235,13 @@ generated files), so regenerating from the `.ioc` keeps it.
 | `Src/gc2145.c` | GC2145 sensor driver (register table from OpenMV), 180° rotation, sleep |
 | `Src/camera.c` | Snapshot and continuous capture (DMA double buffer), cache maintenance, sleep/wake |
 | `Src/jpeg_enc.c` | Hardware JPEG: YUYV → 16×8 MCU rows fed from the codec's GetData callback |
-| `Src/http_stream.c` | HTTP server on port 80: `/`, `/stream`, `/snapshot.jpg`, `/audio` (WebSocket) and the page with the audio player |
+| `Src/http_stream.c` | HTTP server on port 80: `/`, `/stream`, `/snapshot.jpg`, `/audio` (WebSocket), the page with the audio player, `/setup` and the hotspot's captive redirects |
 | `Src/audio.c` | Microphone: DFSDM DMA ring, DC-removing high-pass, gain, FIFO for the WebSocket |
 | `Src/ws_util.c` | WebSocket handshake (SHA-1 + Base64 of the key) |
-| `Src/wifi.c` | WiFi start, WPA2 join, DHCP, mDNS (`nicla-vision.local`), power save, reconnect every 10 s, status text |
+| `Src/wifi.c` | WiFi start, scan, WPA2 join, setup hotspot (AP + DHCP server), mDNS (`nicla-vision.local`), power save, reconnects, status text |
+| `Src/wifi_portal.c` | Captive-portal DNS (every name → `192.168.4.1`) and the setup page, form handling |
+| `Src/wifi_store.c` | Stored network (SSID + password) in the last flash sector, with CRC |
+| `Src/net/dhcpserver/` | DHCP server for the hotspot (from MicroPython, `#include`s adapted) |
 | `Src/sdio.c` | SDMMC2 as an SDIO host (polled FIFO with hardware flow control) |
 | `Src/cyw43_port.c`, `Inc/cyw43_configport.h` | Glue between the WiFi driver and this board |
 | `Inc/lwipopts.h`, `Inc/arch/cc.h` | lwIP configuration (NO_SYS) |
@@ -212,6 +249,11 @@ generated files), so regenerating from the `.ioc` keeps it.
 | `Src/net/lwip/`, `Inc/lwip/`, `Inc/netif/` | lwIP 2.1.2 including its mDNS responder (third party, unmodified) |
 | `Src/usb_link.c` | Framed frames and log lines over USB CDC |
 | `tools/camera_viewer.py` | USB debug viewer for the PC |
+
+**Flash**: the CM7 image sits at `0x08040000` (bank 1, after the Arduino
+bootloader), the CM4 image at `0x08100000` (bank 2, linker script limited to
+896 KB), and the last 128 KB sector of bank 2 (`0x081E0000`) holds the stored
+WiFi network. Uploads don't touch that sector, so the setting stays.
 
 **RAM** (512 KB AXI SRAM): two 150 KB frame buffers, 32 KB JPEG buffer, 16 KB audio FIFO, about
 90 KB for lwIP and the WiFi driver; about 70 KB stays free for the stack.
@@ -228,6 +270,8 @@ generated files), so regenerating from the `.ioc` keeps it.
 | WiFi power save | `cyw43_wifi_pm()` call in `wifi.c` | `CYW43_PERFORMANCE_PM` |
 | SDIO bus clock | `SDIO_BUS_HZ` in `sdio.c` | 24 MHz (the chip allows up to 50) |
 | WiFi country | `CYW43_COUNTRY_WORLDWIDE` in `wifi.c` | worldwide (channels 1–11) |
+| Hotspot password | `WIFI_AP_PASSWORD` in `wifi.h` | `niclasetup` (8–63 characters) |
+| Hotspot retry / timeouts | `HOTSPOT_RETRY_MS`, `JOIN_TIMEOUT_MS`, `LOST_TO_HOTSPOT_MS` in `wifi.c` | 60 s / 20 s / 2 min |
 
 ## 7. USB debug viewer
 
@@ -241,7 +285,7 @@ python NICLA_VISION_WIFI_AV_STREAM/tools/camera_viewer.py
 
 ```
 board: cam=0 id=0x2145 streaming | camera 21 fps, sent 21 fps, 5800 B/frame, encode 3 ms | cpu 19% | dropped 0, jpeg errors 0, restarts 0
-board: wifi: up 192.168.1.42 rssi -57 | http=0, 1 viewer(s) | open http://nicla-vision.local/ or http://192.168.1.42/
+board: wifi: up 192.168.1.42 rssi -57 on "MyWiFi" | http=0, 1 viewer(s) | open http://nicla-vision.local/ or http://192.168.1.42/
 board: mic: on | peak -28 dBFS | dropped blocks 0 | 1 audio listener(s), 50 msgs sent, 0 skipped
 ```
 
@@ -255,11 +299,13 @@ runs. **Close the viewer before uploading**: the upload script needs the COM por
 
 | What you see | Cause / fix |
 |--------------|-------------|
-| Build error *Copy Core/Inc/wifi_secrets.example.h to …* | Create `wifi_secrets.h` (step 2 of the quick start). |
+| Blue LED on, `hotspot "Nicla-Vision-…"` | No network stored, or it isn't reachable: join the hotspot and use the setup page. The page and the status line show the last error. |
+| No setup pop-up after joining the hotspot | Open `http://192.168.4.1/` yourself. Some phones ask to "stay connected" to a network without internet: say yes. |
+| The hotspot drops while the board joins your network | Normal: the radio moves to your router's channel. Reconnect to the hotspot to see the result, or open `http://nicla-vision.local/setup` on your own WiFi. |
 | `nicla-vision.local` not found, but the IP works | The device or browser doesn't resolve mDNS names (some Android versions, some company networks block multicast). Use the IP. |
 | `wifi start=-1 … off` / `chip did not start` | The WiFi chip doesn't answer on SDIO. Check the SDMMC2 pins (PG11 for D2!), `WL_REG_ON` on PG4, and that `HAL_SD_MspInit` is generated. |
-| `network not found` | Wrong SSID, or a 5 GHz-only network. |
-| `wrong password` | Check `WIFI_PASSWORD`. |
+| `last try: network not in range` / `network not found` | Wrong SSID, or a 5 GHz-only network. |
+| `last try: wrong password` | Enter it again on the setup page. |
 | Stuck on `waiting for IP` | Joined, but no DHCP answer. Check the router. |
 | `cam=-1 id=0x0000` (red LED) | The camera doesn't answer on I2C3: check PA8/PC9 and that XCLK (TIM3_CH2 on PA7) runs. |
 | Colours swapped (blue skin) | Cb/Cr order: see `CB_OFFSET` / `CR_OFFSET` in `jpeg_enc.c` (tied to `GC2145_ROTATE`). |
@@ -277,4 +323,5 @@ runs. **Close the viewer before uploading**: the upload script needs the COM por
 | lwIP 2.1.2 | STM32Cube FW_H7 package (`Middlewares/Third_Party/LwIP`) | BSD (`net/lwip/COPYING`) |
 | GC2145 register setup | [OpenMV](https://github.com/openmv/openmv) `drivers/sensors/gc2145.c` | MIT (header of `gc2145.c`) |
 | SDIO register sequences, cyw43 port structure | [MicroPython](https://github.com/micropython/micropython) `ports/stm32` | MIT (credited in `sdio.c`, `cyw43_configport.h`) |
+| DHCP server (`net/dhcpserver/`) | [MicroPython](https://github.com/micropython/micropython) `shared/netutils/dhcpserver.c` | MIT (file headers) |
 | STM32 HAL, CMSIS, USB device library, JPEG utilities | STMicroelectronics | see the `LICENSE.txt` files in `Drivers/`, `Middlewares/`, `Utilities/` |
